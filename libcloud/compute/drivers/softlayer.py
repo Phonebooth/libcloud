@@ -29,13 +29,18 @@ from libcloud.compute.base import NodeDriver, Node, NodeLocation, NodeSize, Node
 DATACENTERS = {
     'sea01': {'country': 'US'},
     'wdc01': {'country': 'US'},
-    'dal01': {'country': 'US'}
+    'dal01': {'country': 'US'},
+    'dal05': {'country': 'US'},
+    'dal07': {'country': 'US'}
 }
 
 NODE_STATE_MAP = {
     'RUNNING': NodeState.RUNNING,
     'HALTED': NodeState.TERMINATED,
     'PAUSED': NodeState.TERMINATED,
+}
+HARDWARE_STATE_MAP = {
+    'ACTIVE': NodeState.RUNNING
 }
 
 DEFAULT_PACKAGE = 46
@@ -249,6 +254,47 @@ class SoftLayerNodeDriver(NodeDriver):
         self.connection = self.connectionCls(key, secret)
         self.connection.driver = self
 
+
+#            'hardware' : {
+#                'hardwareStatus': {
+#                    'status': '',
+#                },
+#                'operatingSystem' : {
+#                    'passwords' : {},
+#                },
+#                'billingItem': '',
+    def _hardware_to_node(self, host):
+        try:
+            password = host['softwareComponents'][0]['passwords'][0]['password']
+        except (IndexError, KeyError):
+            password = None
+
+        hourlyRecurringFee = host.get('billingItem', {}).get('hourlyRecurringFee', 0)
+        recurringFee = host.get('billingItem', {}).get('recurringFee', 0)
+        recurringMonths = host.get('billingItem', {}).get('recurringMonths', 0)
+
+        return Node(
+            id=host['id'],
+            name=host['hostname'],
+            state=HARDWARE_STATE_MAP.get(
+                host['hardwareStatus']['status'],
+                NodeState.UNKNOWN
+            ),
+#            state=host['hardwareStatus']['status'],
+            public_ips=[host['primaryIpAddress']],
+            private_ips=[host['primaryBackendIpAddress']],
+            driver=self,
+            extra={
+                'password': password,
+                'hourlyRecurringFee': hourlyRecurringFee,
+                'recurringFee': recurringFee,
+                'recurringMonths': recurringMonths,
+            }
+        )
+
+    def _hardware_to_nodes(self, hosts):
+        return [self._hardware_to_node(h) for h in hosts]
+
     def _to_node(self, host):
         try:
             password = host['softwareComponents'][0]['passwords'][0]['password']
@@ -258,6 +304,7 @@ class SoftLayerNodeDriver(NodeDriver):
         hourlyRecurringFee = host.get('billingItem', {}).get('hourlyRecurringFee', 0)
         recurringFee = host.get('billingItem', {}).get('recurringFee', 0)
         recurringMonths = host.get('billingItem', {}).get('recurringMonths', 0)
+
 
         return Node(
             id=host['id'],
@@ -417,8 +464,12 @@ class SoftLayerNodeDriver(NodeDriver):
 
         # checking "in DATACENTERS", because some of the locations returned by getDatacenters are not useable.
         return [self._to_loc(l) for l in res if l['name'] in DATACENTERS]
-
     def list_nodes(self):
+        nodes = self.list_virtual()
+        nodes += self.list_hardware()
+        return nodes
+
+    def list_virtual(self):
         mask = {
             'virtualGuests': {
                 'powerState': '',
@@ -435,6 +486,28 @@ class SoftLayerNodeDriver(NodeDriver):
         )
         nodes = self._to_nodes(res)
         return nodes
+
+    def list_hardware(self):
+        mask = {
+            'hardware' : {
+                'hardwareStatus': {
+                    'status': '',
+                },
+                'operatingSystem' : {
+                    'passwords' : {},
+                },
+                'billingItem': '',
+            }
+        }
+        no_mask = {}
+        res = self.connection.request(
+            "SoftLayer_Account",
+            "getHardware",
+            object_mask=mask
+        )
+        nodes = self._hardware_to_nodes(res)
+        return nodes
+
 
     def reboot_node(self, node):
         res = self.connection.request(
